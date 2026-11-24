@@ -80,6 +80,7 @@ pre{white-space:pre-wrap;background:var(--band);padding:10px;border-radius:6px;f
 
   <div id="list-wrap">
     <h2 id="list-title">Entries</h2>
+    <div id="list-msg"></div>
     <div class="scroll"><table id="list"><thead></thead><tbody></tbody></table></div>
   </div>
 </section>
@@ -89,6 +90,7 @@ pre{white-space:pre-wrap;background:var(--band);padding:10px;border-radius:6px;f
   <pre id="probe-out"></pre>
   <button id="probe-copy" class="ghost">Copy the results</button>
 </section>
+<p class="muted" id="build">Staging page, built November 23, 2026, 7:31 PM Central.</p>
 </main>
 <script>
 /* supabase-js 2.118.0, MIT License, https://github.com/supabase/supabase-js */
@@ -171,27 +173,33 @@ function show() {
   $("imp").classList.toggle("hide", !has("implementer"));
 }
 
-// ---- Lists for each role ----
+// ---- Lists for each role. Each table is read on its own, so one failure is named and the rest still show ----
 async function list() {
-  const head = $("list").tHead, body = $("list").tBodies[0]; body.innerHTML = "";
-  const { data: es, error } = await db.from("entries").select("id, org_id, received_at, intervention, payload, organizations(name), checks(level, checked_on), shares(funder_org_id)").order("received_at", { ascending: false });
-  if (error) { body.innerHTML = `<tr><td>${esc(error.message)}</td></tr>`; return; }
+  const head = $("list").tHead, body = $("list").tBodies[0], msg = $("list-msg"); body.innerHTML = ""; msg.innerHTML = "";
   const rev = has("chlp_reviewer"), imp = has("implementer");
   $("list-title").textContent = rev ? "Every invented entry (CHLP reviewer)" : imp ? "Your organization's entries" : "Entries shared with your funder";
-  let contacts = {};
-  if (rev) { const { data: cs } = await db.from("contacts").select("entry_id, name, email"); (cs || []).forEach(c => contacts[c.entry_id] = c); }
-  let funders = [];
-  if (imp) { const { data: fs } = await db.from("organizations").select("id, name").eq("kind", "funder"); funders = fs || []; }
+  const fail = [];
+  const get = async (t, cols, f) => { let q = db.from(t).select(cols); if (f) q = f(q); const r = await q; if (r.error) { fail.push(`${t}: ${r.error.message}${r.error.code ? ` (code ${r.error.code})` : ""}`); return []; } return r.data || []; };
+  const es = await get("entries", "id, org_id, received_at, intervention, payload", q => q.order("received_at", { ascending: false }));
+  const orgs = await get("organizations", "id, name, kind");
+  const cks = await get("checks", "entry_id, level, checked_on");
+  const shs = await get("shares", "entry_id, funder_org_id");
+  const contacts = {}; if (rev) (await get("contacts", "entry_id, name, email")).forEach(c => contacts[c.entry_id] = c);
+  const orgName = id => (orgs.find(o => o.id === id) || {}).name || "";
+  const funders = orgs.filter(o => o.kind === "funder");
+  if (fail.length) msg.innerHTML = `<div class="problems"><strong>Part of the list could not load.</strong><ul>${fail.map(f => `<li>${esc(f)}</li>`).join("")}</ul></div>`;
   head.innerHTML = `<tr><th>Received</th><th>Organization</th><th>Intervention</th><th>Units, central</th><th>Cost a year, central</th><th>Check</th>${rev ? "<th>Contact</th><th>Record</th>" : ""}${imp ? "<th>Share</th>" : ""}</tr>`;
   if (!es.length) { body.innerHTML = `<tr><td colspan="9" class="muted">None yet.</td></tr>`; return; }
   for (const e of es) {
-    const last = (e.checks || []).slice().sort((a, b) => (a.checked_on < b.checked_on ? 1 : -1))[0];
+    const last = cks.filter(c => c.entry_id === e.id).sort((a, b) => (a.checked_on < b.checked_on ? 1 : -1))[0];
+    const shared = shs.some(s => s.entry_id === e.id);
+    const u = (e.payload && e.payload.units) || {}, c = (e.payload && e.payload.cost) || {};
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${esc(new Date(e.received_at).toLocaleString("en-US"))}</td><td>${esc(e.organizations && e.organizations.name)}</td><td>${esc(e.intervention)}</td>`
-      + `<td>${esc(e.payload.units && e.payload.units.central)}</td><td>$${esc(e.payload.cost && Number(e.payload.cost.central).toLocaleString("en-US"))}</td>`
+    tr.innerHTML = `<td>${esc(new Date(e.received_at).toLocaleString("en-US"))}</td><td>${esc(orgName(e.org_id))}</td><td>${esc(e.intervention)}</td>`
+      + `<td>${esc(u.central)}</td><td>${c.central == null ? "" : "$" + esc(Number(c.central).toLocaleString("en-US"))}</td>`
       + `<td>${esc(last ? `${last.level}, ${last.checked_on}` : "Self-reported")}</td>`
       + (rev ? `<td>${esc(contacts[e.id] ? `${contacts[e.id].name}, ${contacts[e.id].email}` : "")}</td><td><select aria-label="Level">${LEVELS.map(l => `<option>${l}</option>`).join("")}</select><button data-act="check">Record check</button><input aria-label="Correction" placeholder="Correction note"><button class="ghost" data-act="corr">Log</button></td>` : "")
-      + (imp ? `<td>${(e.shares || []).length ? "Shared" : ""}<select aria-label="Funder">${funders.map(f => `<option value="${esc(f.id)}">${esc(f.name)}</option>`).join("")}</select><button data-act="share">Share</button></td>` : "");
+      + (imp ? `<td>${shared ? "<strong>Shared</strong><br>" : ""}<select aria-label="Funder">${funders.map(f => `<option value="${esc(f.id)}">${esc(f.name)}</option>`).join("")}</select><button data-act="share">Share</button></td>` : "");
     tr.dataset.id = e.id; body.appendChild(tr);
   }
 }
@@ -203,7 +211,7 @@ async function rowAction(ev) {
   if (b.dataset.act === "corr") { const note = tr.querySelector("input").value.trim(); if (!note) return; r = await db.from("corrections").insert({ entry_id: id, note, logged_by: ME.user.id }); }
   if (r && r.error) alertBox(r.error.message); else await list();
 }
-function alertBox(t) { $("send-msg").innerHTML = `<div class="problems">${esc(t)}</div>`; }
+function alertBox(t) { $("list-msg").innerHTML = `<div class="problems">The database refused it: ${esc(t)}</div>`; }
 
 // ---- Sending an entry ----
 async function send() {
